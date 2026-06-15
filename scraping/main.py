@@ -56,10 +56,24 @@ def get_output_path() -> Path:
     return output_path
 
 
+from confluent_kafka import Producer
+import os
+
+def delivery_report(err, msg):
+    if err is not None:
+        logging.error(f"Message delivery failed: {err}")
+    else:
+        logging.debug(f"Message delivered to {msg.topic()} [{msg.partition()}]")
+
 async def run() -> None:
-    """Scrape a list of target stores and persist aggregated validated data to disk."""
+    """Scrape a list of target stores and publish to Kafka."""
     logger = logging.getLogger(__name__)
-    all_products: List[Product] = []
+    
+    kafka_conf = {
+        'bootstrap.servers': os.getenv("KAFKA_BOOTSTRAP_SERVERS", "marketlens-kafka:9092"),
+        'client.id': 'marketlens-ingestion-producer'
+    }
+    producer = Producer(kafka_conf)
     
     success_count = 0
     failure_count = 0
@@ -81,14 +95,13 @@ async def run() -> None:
                 continue
                 
             products = await agent.scrape_store(url)
-            all_products.extend(products)
             
-            if len(all_products) >= 3000:
-                all_products = all_products[:3000]
-                logger.info("Reached maximum global limit of 3000 products. Stopping scraping.")
-                success_count += 1
-                break
-                
+            for product in products:
+                payload = product.model_dump_json()
+                producer.produce('raw-market-data', key=product.product_id, value=payload, callback=delivery_report)
+            
+            producer.flush()
+            
             success_count += 1
             
         except Exception as exc:
@@ -101,25 +114,11 @@ async def run() -> None:
         finally:
             await asyncio.sleep(3)
 
-    if all_products:
-        output_path = get_output_path()
-        payload = [product.model_dump(mode="json") for product in all_products]
-        output_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
-        
-        logger.info(
-            "Batch scraping completed and saved.",
-            extra={
-                "total_products": len(all_products),
-                "path": str(output_path)
-            }
-        )
-        
     logger.info(
         "Final Scraping Summary",
         extra={
             "successful_stores": success_count,
-            "failed_stores": failure_count,
-            "total_products_extracted": len(all_products)
+            "failed_stores": failure_count
         }
     )
 

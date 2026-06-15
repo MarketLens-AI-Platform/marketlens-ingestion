@@ -4,3 +4,4 @@ playwright
 httpx
 pydantic
 tenacity
+confluent-kafka
